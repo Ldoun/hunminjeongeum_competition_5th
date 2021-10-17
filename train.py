@@ -18,7 +18,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Config
-
+from ctcdecode import CTCBeamDecoder
 
 def evaluate(model, batch, device):
     model.to(device)
@@ -26,16 +26,25 @@ def evaluate(model, batch, device):
     # english start token.
     tokenizer = dict_for_infer["tokenizer"]
 
+    alpha=0
+    beta=0
+    beam_width = 1024
+
+    beam_decoder = CTCBeamDecoder(tokenizer.txt2idx.keys(), lm_path=None,
+                                 alpha=alpha, beta=beta,
+                                 cutoff_top_n=40, cutoff_prob=1.0,
+                                 beam_width=beam_width, num_processes=7,
+                                 blank_id=tokenizer.txt2idx("<pad>"))
+
+    
     with torch.no_grad():
         logits = model(batch).logits
 
-    predicted_ids = torch.argmax(logits, dim=-1)
-    output = predicted_ids.cpu().numpy()
+    beam_results, beam_scores, timesteps, out_lens = beam_decoder.decode(logits)
 
     result_list = []
-    for token in output:
-        summary = tokenizer.convert(token)
-        result_list.append(summary)
+    for token in beam_results:
+        result_list.append("".join([tokenizer.idx2txt[x] for x in token[0]]))
 
     return result_list
 

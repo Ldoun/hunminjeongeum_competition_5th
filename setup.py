@@ -22,6 +22,5 @@ setup(
         "apex",
         "datasets",
         "jiwer",
-        "ctcdecode"
     ],
 )
