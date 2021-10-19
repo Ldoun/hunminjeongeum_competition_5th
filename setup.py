@@ -1,4 +1,4 @@
-# nsml: ldoun8260/nsml:latest
+# nsml: ldoun8260/nsml:8.0
 
 from distutils.core import setup
 
@@ -15,12 +15,12 @@ setup(
         "tensorboard-plugin-wit==1.8.0",
         "tensorboardX==2.1",
         "torch-optimizer",
-        "torch==1.7.1",
+        #"torch==1.7.1",
         "torchmetrics",
         "tqdm",
         "transformers",
         "apex",
         "datasets",
-        "jiwer",
+        "jiwer"
     ],
 )
