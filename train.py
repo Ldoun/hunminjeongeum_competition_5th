@@ -30,7 +30,7 @@ def evaluate(model, batch, device):
     beta=0
     beam_width = 100
 
-    beam_decoder = CTCBeamDecoder(tokenizer.txt2idx.keys() ,
+    beam_decoder = CTCBeamDecoder(tokenizer.vocab ,
                                  alpha=alpha, beta=beta,
                                  cutoff_top_n=40, cutoff_prob=1.0,
                                  beam_width=beam_width, num_processes=7,
@@ -75,19 +75,12 @@ def bind_model(model, parser):
         global checkpoint
         checkpoint = torch.load(save_dir)
 
+        model.load_state_dict(checkpoint["model"])
 
         global dict_for_infer
         with open(os.path.join(dir_name, "dict_for_infer"), "rb") as f:
             dict_for_infer = pickle.load(f)
 
-        tokenizer = dict_for_infer["tokenizer"]
-
-        model.lm_head = nn.Linear(
-            in_features=768, out_features=len(tokenizer.txt2idx), bias=True
-        )
-
-        model.load_state_dict(checkpoint["model"])
-        
         print("로딩 완료!")
 
     def infer(test_path, **kwparser):
@@ -156,7 +149,7 @@ def validate(valid_dataloader, model, tokenizer):
     beta=0
     beam_width = 100
 
-    beam_decoder = CTCBeamDecoder(tokenizer.txt2idx.keys() ,
+    beam_decoder = CTCBeamDecoder(tokenizer.vocab,
                                  alpha=alpha, beta=beta,
                                  cutoff_top_n=40, cutoff_prob=1.0,
                                  beam_width=beam_width, num_processes=7,
@@ -223,6 +216,9 @@ if __name__ == "__main__":
     model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-base")
     model.freeze_feature_extractor()
     model.config = config
+    model.lm_head = nn.Linear(
+        in_features=768, out_features=args.max_vocab_size, bias=True
+    )
 
     bind_model(model=model, parser=args)
 
@@ -255,11 +251,6 @@ if __name__ == "__main__":
         else:
             tokenizer = CustomTokenizer()
             tokenizer.fit(train_label.text)
-
-        
-        model.lm_head = nn.Linear(
-            in_features=768, out_features=len(tokenizer.txt2idx), bias=True
-        )
 
         train_tokens = tokenizer.txt2token(train_label.text)
         valid_tokens = tokenizer.txt2token(val_label.text)

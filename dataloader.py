@@ -23,6 +23,7 @@ class CustomTokenizer(object):
         self.max_length = max_length
         self.char_count = {}
         self.max_vocab_size = max_vocab_size
+        self.vocab = []
 
     def jamo_decode(self, sentence):
         jamo_sentence = j2hcj(h2j(sentence))
@@ -57,6 +58,10 @@ class CustomTokenizer(object):
                 self.txt2idx[char] = i + 4
                 self.idx2txt[i + 4] = char
 
+        self.vocab = self.txt2idx.keys()
+        if len(self.vocab) < self.max_vocab_size:
+            self.vocab.extend(['$'] * self.max_vocab_size - len(self.vocab))
+            
     def sort_target(self, x):
         return x[1]
 
