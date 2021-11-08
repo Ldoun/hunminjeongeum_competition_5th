@@ -1,3 +1,5 @@
+from importlib.metadata import metadata
+from pandas.core.frame import DataFrame
 from transformers import Wav2Vec2FeatureExtractor
 from torch.utils.data import DataLoader, Dataset
 from jamo import h2j, j2hcj
@@ -11,10 +13,11 @@ from itertools import groupby
 import re
 import pandas as pd
 
-def get_duration(file):
-    #a,sr = librosa.load(file)
-    #return len(a)
-    return librosa.get_duration(filename=file)
+def get_pcm_duration(file):
+    with open(file, 'rb') as opened_pcm_file:
+        buf = opened_pcm_file.read()
+        length = len(np.frombuffer(buf, dtype = 'int16'))
+    return length
 
 class CustomTokenizer(object):
     def __init__(self, max_length=99999, max_vocab_size=-1):
@@ -173,11 +176,11 @@ class RandomBucketBatchSampler(object):
 
 
 class CustomDataset(Dataset):
-    def __init__(self, path_list, target_list=None, mode="train",sort = True, max_size = 0, min_size = 0):
+    def __init__(self,file_list, target_list=None, mode="train", sort = True, max_size = 0, min_size = 2000):
         self.sr = 16000
         self.mode = mode
         self.metadata = pd.DataFrame()
-        self.metadata['file'] = pd.Series(path_list)
+        self.metadata['file'] = pd.Series(file_list)
         if self.mode == 'train':
             self.metadata['target'] = pd.Series(target_list)
 
@@ -191,27 +194,22 @@ class CustomDataset(Dataset):
         )
 
         if sort and self.mode == "train":
-            print('getting duration of file')
-            self.metadata['length'] = self.metadata['file'].apply(lambda x: get_duration(x))
+            self.metadata['length'] = self.metadata['file'].apply(lambda x: get_pcm_duration(x))
             self.metadata.sort_values(by=['length'], inplace=True, ascending=False)
             self.metadata = self.metadata[(self.metadata['length'] < max_size) & (self.metadata['length'] > min_size) ]
-
+        
         if self.mode == 'train':
             print(self.metadata.head())
             print(self.metadata.tail())
-
 
     def __len__(self):
         return len(self.metadata)
 
     def __getitem__(self, i):
-        data, rate = librosa.load(self.metadata.iloc[i]['file'], sr=None)
-        data = librosa.resample(data, orig_sr=48000, target_sr=16000)
-        """ sound = np.zeros(self.sound_max_length)
-        if len(data) <= self.sound_max_length:
-            sound[:data.shape[0]] = data
-        else:
-            sound = data[:self.sound_max_length]"""
+        with open(self.metadata.iloc[i]['file'], 'rb') as opened_pcm_file:
+            buf = opened_pcm_file.read()
+            pcm_data = np.frombuffer(buf, dtype = 'int16')
+            data = librosa.util.buf_to_float(pcm_data, 2)
 
         sound = self.feature_extractor(
             data, sampling_rate=16000, return_tensors="pt"
@@ -223,6 +221,7 @@ class CustomDataset(Dataset):
 
         else:
             return sound
+
 
 class AudioCollate(object):
     def __init__(self):
