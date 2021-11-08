@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from shutil import ExecError
 import numpy as np
 import torch
 import torch.nn as nn
@@ -16,34 +17,25 @@ import nsml
 from nsml import HAS_DATASET, DATASET_PATH
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
+import json
 
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Config
 from ctcdecode import CTCBeamDecoder
 
 def evaluate(model, batch, device):
+    model.eval()
     model.to(device)
-    # as the target is english, the first word to the transformer should be the
-    # english start token.
-    tok = dict_for_infer["tokenizer"]
-    tokenizer = CustomTokenizer()
-    tokenizer.txt2idx = tok.txt2idx
-    tokenizer.idx2txt = tok.idx2txt
-    tokenizer.max_vocab_size = tok.max_vocab_size
-    #Tokenizer 수정 필요
     
-    print('tokenizer test')
-    print(tokenizer.convert([0,4,5,6,7,7,7,6,5,4,4,4,19,2,7,7,7,7,78,88,9,10],predicted=False))
+    tokenizer  = dict_for_infer["tokenizer"]
 
     alpha=0
     beta=0
-    beam_width = 100
-    vocab = list(tokenizer.idx2txt.values())
-    vocab.extend(['$'] * (80 - len(vocab)))
+    beam_width = 300
 
-    beam_decoder = CTCBeamDecoder(vocab,
+    beam_decoder = CTCBeamDecoder(tokenizer.vocab,
                                  alpha=alpha, beta=beta,
                                  cutoff_top_n=40, cutoff_prob=1.0,
-                                 beam_width=beam_width, num_processes=7,
+                                 beam_width=beam_width, num_processes=8,
                                  blank_id=tokenizer.txt2idx["<pad>"],
                                  log_probs_input=True)
     
@@ -61,7 +53,6 @@ def evaluate(model, batch, device):
 
 
 def save_checkpoint(checkpoint, dir):
-
     torch.save(checkpoint, os.path.join(dir))
 
 
@@ -71,6 +62,7 @@ def bind_model(model, parser):
         # directory
         os.makedirs(dir_name, exist_ok=True)
         save_dir = os.path.join(dir_name, "checkpoint")
+        
         save_checkpoint(dict_for_infer, save_dir)
 
         with open(os.path.join(dir_name, "dict_for_infer"), "wb") as f:
@@ -86,11 +78,16 @@ def bind_model(model, parser):
         global checkpoint
         checkpoint = torch.load(save_dir)
 
-        model.load_state_dict(checkpoint["model"])
-
         global dict_for_infer
         with open(os.path.join(dir_name, "dict_for_infer"), "rb") as f:
             dict_for_infer = pickle.load(f)
+
+        tokenizer = dict_for_infer["tokenizer"]
+        model.lm_head = nn.Linear(
+            in_features=768, out_features=len(tokenizer.txt2idx), bias=True
+        )
+        model.config = Wav2Vec2Config(vocab_size=len(tokenizer.txt2idx))
+        model.load_state_dict(checkpoint["model"])
 
         print("로딩 완료!")
 
@@ -100,13 +97,13 @@ def bind_model(model, parser):
             glob(os.path.join(DATASET_PATH, "test", "test_data", "*"))
         )
 
-        test_dataset = CustomDataset(path_list=test_file_list, mode="test")
+        test_dataset = CustomDataset(test_file_list, mode="test")
         test_sampler = RandomBucketBatchSampler(
             test_dataset, batch_size=dict_for_infer["batch_size"], drop_last=False
         )
         callate_fn = AudioCollate()
         test_data_loader = DataLoader(
-            test_dataset, batch_sampler=test_sampler, collate_fn=callate_fn, num_workers=7,pin_memory=True
+            test_dataset,batch_size=dict_for_infer["batch_size"], collate_fn=callate_fn, num_workers=8,pin_memory=True
         )
 
         result_list = []
@@ -159,12 +156,11 @@ def validate(valid_dataloader, model, tokenizer):
     alpha=0
     beta=0
     beam_width = 100
-    vocab = list(tokenizer.idx2txt.values())
-    vocab.extend(['$'] * (80 - len(vocab)))
-    beam_decoder = CTCBeamDecoder(vocab,
+    
+    beam_decoder = CTCBeamDecoder(tokenizer.vocab,
                                  alpha=alpha, beta=beta,
                                  cutoff_top_n=40, cutoff_prob=1.0,
-                                 beam_width=beam_width, num_processes=7,
+                                 beam_width=beam_width, num_processes=8,
                                  blank_id=tokenizer.txt2idx["<pad>"],
                                  log_probs_input=True)
 
@@ -178,6 +174,7 @@ def validate(valid_dataloader, model, tokenizer):
             model_predictions = model(speech, labels=text).logits
 
         '''predicted_ids = torch.argmax(model_predictions, dim=-1)
+
         
         predictions = [
             tokenizer.convert(sen) for sen in predicted_ids.cpu().numpy()
@@ -193,20 +190,18 @@ def validate(valid_dataloader, model, tokenizer):
 
         references = [tokenizer.convert(sen,predicted=False) for sen in text.cpu().numpy()]
         
-        print(result_list)
-        print('-'*80)
-        print(references)
-        '''print('-'*80)
-        print(predictions)'''
+        print(result_list[0])
 
         metric.add_batch(predictions=result_list, references=references)
         
-        final_score = metric.compute()
-        
-        print(final_score)
+    final_score = metric.compute()
 
     return {"cer": final_score}
 
+def clean(sen):
+    cleaned_sen = re.sub('SP|FP|SN|NO|\(|\)|:|\*|,|…','',sen)
+    cleaned_sen = re.sub('\s{2,}',' ',cleaned_sen)
+    return cleaned_sen
 
 if __name__ == "__main__":
     # See all possible arguments in src/transformers/training_args.py
@@ -221,14 +216,14 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--total_epoch", type=int, default=40)
-    parser.add_argument("--warmup_step", type=int, default=3000)
+    parser.add_argument("--warmup_step", type=int, default=2000)
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--reload_from", type=int, default=0)
     parser.add_argument("--log_every", type=int, default=1)
-    parser.add_argument("--valid_every", type=int, default=700)
-    parser.add_argument("--save_every", type=int, default=700)
+    parser.add_argument("--valid_every", type=int, default=5000)
+    parser.add_argument("--save_every", type=int, default=5000)
     parser.add_argument("--strategy", type=str, default="step")
-    parser.add_argument("--max_vocab_size", type=int, default=80)
+    parser.add_argument("--max_vocab_size", type=int, default=-1)
     parser.add_argument("--checkpoint", type=str)
     parser.add_argument("--session", type=str)
 
@@ -236,13 +231,8 @@ if __name__ == "__main__":
 
     global dict_for_infer
 
-    config = Wav2Vec2Config(vocab_size=args.max_vocab_size)
     model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-base")
     model.freeze_feature_extractor()
-    model.config = config
-    model.lm_head = nn.Linear(
-        in_features=768, out_features=args.max_vocab_size, bias=True
-    )
 
     bind_model(model=model, parser=args)
 
@@ -252,7 +242,8 @@ if __name__ == "__main__":
     if args.mode == "train":
        
         train_path = os.path.join(DATASET_PATH, "train")
-        file_list = sorted(glob(os.path.join(train_path, "train_data", "*")))
+        file_list = sorted(glob(os.path.join(train_path, "train_data","wav", "*")))
+        json_list = sorted(glob(os.path.join(train_path, "train_data","train_info", "*")))
         label = pd.read_csv(os.path.join(train_path, "train_label"))
 
         split_num = int(len(label) * 0.9)
@@ -261,7 +252,64 @@ if __name__ == "__main__":
 
         train_label = label.iloc[:split_num]
         val_label = label.iloc[split_num:]
+        
+        with open(json_list[0], "r") as read_content:
+            print(json.load(read_content))
+        print('-'*80)
+        with open(json_list[1], "r") as read_content:
+            print(json.load(read_content))
+        print('-'*80)
+        with open(json_list[2], "r") as read_content:
+            print(json.load(read_content))
 
+        raise       
+        
+
+        '''index = file_list.index('/data/final_stt_2/train/train_data/idx0011203')
+        print(label.iloc[index])
+        index = file_list.index('/data/final_stt_2/train/train_data/idx0011201')
+        print(label.iloc[index])'''
+        #파일길이가 너무 짧긴한데 우선 진행한다.
+        '''duration = sorted([get_duration(file) for file in file_list])
+        
+        print('start measuring duration')
+        print('0%:', str(duration[:10]))
+        print('50%: ',str(duration[int(len(duration) * 0.5)]))
+        print('80%: ',str(duration[int(len(duration) * 0.8)]))
+        print('90%: ',str(duration[int(len(duration) * 0.9)]))
+        print('95%: ',str(duration[int(len(duration) * 0.95)]))
+        print('98%: ',str(duration[int(len(duration) * 0.98) -1]))
+        print('99%: ',str(duration[int(len(duration) * 0.99) -1]))
+        print('99.5%: ',str(duration[int(len(duration) * 0.995) -1]))
+        print('100%: ',str(duration[int(len(duration)) -1]))
+        
+        print(len(duration) - int(len(duration) * 0.995))
+        print(len(duration))
+
+        50%:  68796
+        80%:  92610
+        90%:  108486
+        95%:  125685
+        98%:  148176
+        99%:  168021
+        99.5%:  191835
+        100%:  5282739
+        986
+        197146
+        
+        
+        50%:  3.12
+        80%:  4.2
+        90%:  4.92
+        95%:  5.7
+        98%:  6.72
+        99%:  7.62
+        99.5%:  8.7
+        100%:  239.58
+        '''
+
+        train_label = [clean(sen) for sen in train_label.text]
+        val_label = [clean(sen) for sen in val_label.text]
 
         if args.reload_from != 0:
             nsml.load(args.checkpoint, session = args.session)
@@ -271,16 +319,22 @@ if __name__ == "__main__":
             args.total_epoch = dict_for_infer['epochs']
             args.lr = dict_for_infer['learning_rate']
 
-
         else:
             tokenizer = CustomTokenizer()
-            tokenizer.fit(train_label.text)
+            tokenizer.fit(train_label)
 
-        train_tokens = tokenizer.txt2token(train_label.text)
-        valid_tokens = tokenizer.txt2token(val_label.text)
+        print(tokenizer.txt2idx)
 
-        train_dataset = CustomDataset(train_file_list, train_tokens)
-        valid_dataset = CustomDataset(val_file_list, valid_tokens)
+        model.lm_head = nn.Linear(
+            in_features=768, out_features=len(tokenizer.txt2idx), bias=True
+        )
+        model.config = Wav2Vec2Config(vocab_size=len(tokenizer.txt2idx))
+
+        train_tokens = tokenizer.txt2token(train_label)
+        valid_tokens = tokenizer.txt2token(val_label)
+
+        train_dataset = CustomDataset(train_file_list, train_tokens, max_size=7.62, min_size=0)
+        valid_dataset = CustomDataset(val_file_list, valid_tokens,  max_size=7.62, min_size=0)
 
         train_batch_sampler = RandomBucketBatchSampler(
             train_dataset, batch_size=args.batch_size, drop_last=False
@@ -295,14 +349,14 @@ if __name__ == "__main__":
             train_dataset,
             batch_sampler=train_batch_sampler,
             collate_fn=collate_fn,
-            num_workers=7,
+            num_workers=8,
             pin_memory=True
         )
         valid_dataloader = DataLoader(
             valid_dataset,
             batch_sampler=valid_batch_sampler,
             collate_fn=collate_fn,
-            num_workers=7,
+            num_workers=8,
             pin_memory=True
         )
 

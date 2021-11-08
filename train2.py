@@ -22,6 +22,7 @@ from ctcdecode import CTCBeamDecoder
 
 def evaluate(model, batch, device):
     model.to(device)
+    model.eval()
     # as the target is english, the first word to the transformer should be the
     # english start token.
     tok = dict_for_infer["tokenizer"]
@@ -30,9 +31,6 @@ def evaluate(model, batch, device):
     tokenizer.idx2txt = tok.idx2txt
     tokenizer.max_vocab_size = tok.max_vocab_size
     #Tokenizer 수정 필요
-    
-    print('tokenizer test')
-    print(tokenizer.convert([0,4,5,6,7,7,7,6,5,4,4,4,19,2,7,7,7,7,78,88,9,10],predicted=False))
 
     alpha=0
     beta=0
@@ -43,10 +41,10 @@ def evaluate(model, batch, device):
     beam_decoder = CTCBeamDecoder(vocab,
                                  alpha=alpha, beta=beta,
                                  cutoff_top_n=40, cutoff_prob=1.0,
-                                 beam_width=beam_width, num_processes=7,
+                                 beam_width=beam_width, num_processes=8,
                                  blank_id=tokenizer.txt2idx["<pad>"],
                                  log_probs_input=True)
-    
+
     with torch.no_grad():
         logits = model(batch).logits
 
@@ -106,7 +104,7 @@ def bind_model(model, parser):
         )
         callate_fn = AudioCollate()
         test_data_loader = DataLoader(
-            test_dataset, batch_sampler=test_sampler, collate_fn=callate_fn, num_workers=7,pin_memory=True
+            test_dataset, batch_size=dict_for_infer["batch_size"], collate_fn=callate_fn, num_workers=7,pin_memory=True
         )
 
         result_list = []
@@ -158,7 +156,7 @@ def validate(valid_dataloader, model, tokenizer):
 
     alpha=0
     beta=0
-    beam_width = 100
+    beam_width = 1024
     vocab = list(tokenizer.idx2txt.values())
     vocab.extend(['$'] * (80 - len(vocab)))
     beam_decoder = CTCBeamDecoder(vocab,
@@ -191,19 +189,18 @@ def validate(valid_dataloader, model, tokenizer):
             a = tokenizer.convert(token[0][:out_len[0]],predicted=False)
             result_list.append(a)
 
-        references = [tokenizer.convert(sen,predicted=False) for sen in text.cpu().numpy()]
-        
         print(result_list)
-        print('-'*80)
+        print('-'* 80)
+        references = [tokenizer.convert(sen,predicted=False) for sen in text.cpu().numpy()]
         print(references)
         '''print('-'*80)
+        print(result_list)
+        print('-'*80)
         print(predictions)'''
 
         metric.add_batch(predictions=result_list, references=references)
         
-        final_score = metric.compute()
-        
-        print(final_score)
+    final_score = metric.compute()
 
     return {"cer": final_score}
 
