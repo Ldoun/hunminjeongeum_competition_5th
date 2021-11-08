@@ -1,4 +1,4 @@
-# nsml: ldoun8260/nsml:8.0
+# nsml: ldoun8260/n sml:9.0
 
 from distutils.core import setup
 
