@@ -27,16 +27,17 @@ def evaluate(model, batch, device):
     
     tokenizer  = dict_for_infer["tokenizer"]
 
-    alpha=0
+    alpha=2.5
     beta=0
-    beam_width = 300
+    beam_width = 25
 
     beam_decoder = CTCBeamDecoder(tokenizer.vocab,
-                                 alpha=alpha, beta=beta,
-                                 cutoff_top_n=40, cutoff_prob=1.0,
-                                 beam_width=beam_width, num_processes=8,
-                                 blank_id=tokenizer.txt2idx["<pad>"],
-                                 log_probs_input=True)
+                                model_path='n-gram/stt2_n3.binary',
+                                alpha=alpha, beta=beta,
+                                cutoff_top_n=40, cutoff_prob=0.99,
+                                beam_width=beam_width, num_processes=4,
+                                blank_id=tokenizer.txt2idx["<pad>"],
+                                log_probs_input=True)
     
     with torch.no_grad():
         logits = model(batch).logits
@@ -304,7 +305,6 @@ if __name__ == "__main__":
             tokenizer = dict_for_infer['tokenizer']
 
             args.batch_size = dict_for_infer['batch_size']
-            args.total_epoch = dict_for_infer['epochs']
             args.lr = dict_for_infer['learning_rate']
 
         else:
@@ -408,6 +408,7 @@ if __name__ == "__main__":
             args.save_every = n_iters
 
         itr_global = args.reload_from + 1
+
         for epoch in range(int(args.reload_from / n_iters) + 1, args.total_epoch + 1):
             itr_start_time = time.time()
             losses = []

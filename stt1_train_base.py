@@ -33,6 +33,7 @@ def evaluate(model, batch, device):
     beam_width = 300
 
     beam_decoder = CTCBeamDecoder(tokenizer.vocab,
+                                  #model_path = 'n-gram/stt_2_n3.arpa',
                                  alpha=alpha, beta=beta,
                                  cutoff_top_n=40, cutoff_prob=1.0,
                                  beam_width=beam_width, num_processes=8,

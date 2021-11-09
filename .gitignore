@@ -131,3 +131,9 @@ dmypy.json
 # Pyre type checker
 .pyre/
 preprocess.py
+json2tsv.py
+
+*.arpa
+*.binary
+json2tsv_.py
+*.txt
