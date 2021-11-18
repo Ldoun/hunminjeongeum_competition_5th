@@ -21,25 +21,13 @@ from tqdm import tqdm
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Config
 from ctcdecode import CTCBeamDecoder
 import pandas as pd
+import time
+from apex import amp
 
-def evaluate(model, batch, device):
+def evaluate(model, batch, tokenizer, beam_decoder):
     model.eval()
-    model.to(device)
     
-    tokenizer  = dict_for_infer["tokenizer"]
-
-    alpha=0
-    beta=0
-    beam_width = 300
-
-    beam_decoder = CTCBeamDecoder(tokenizer.vocab,
-                                  #model_path = 'n-gram/stt_2_n3.arpa',
-                                 alpha=alpha, beta=beta,
-                                 cutoff_top_n=40, cutoff_prob=1.0,
-                                 beam_width=beam_width, num_processes=8,
-                                 blank_id=tokenizer.txt2idx["<pad>"],
-                                 log_probs_input=True)
-    
+    now = time.time()
     with torch.no_grad():
         logits = model(batch).logits
 
@@ -49,7 +37,8 @@ def evaluate(model, batch, device):
     for token,out_len in zip(beam_results.cpu().numpy(),out_lens):
         a = tokenizer.convert(token[0][:out_len[0]],predicted=False)
         result_list.append(a)
-
+    print(time.time()  - now)
+    
     return result_list
 
 
@@ -89,7 +78,7 @@ def bind_model(model, parser):
             #in_features=768, out_features=80, bias=True
         )
         model.config = Wav2Vec2Config(vocab_size=len(tokenizer.txt2idx))
-        model.load_state_dict(checkpoint["model"])
+        #model.load_state_dict(checkpoint["model"])
 
         print("로딩 완료!")
 
@@ -109,11 +98,32 @@ def bind_model(model, parser):
             test_dataset,batch_size=dict_for_infer["batch_size"], collate_fn=callate_fn, num_workers=8,pin_memory=True
         )
 
+        alpha=0.3
+        beta=5
+        beam_width = 300
+        
+        tokenizer  = dict_for_infer["tokenizer"]
+        beam_decoder = CTCBeamDecoder(tokenizer.vocab,
+                                #model_path='n-gram/stt1/binary/stt1_n2.binary',
+                                alpha=0, beta=0,
+                                cutoff_top_n=45, cutoff_prob=1.0,
+                                beam_width=beam_width, num_processes=4,
+                                blank_id=tokenizer.txt2idx["<pad>"],
+                                log_probs_input=True)
+        
         result_list = []
+        
+        model.to(device)
+        if args.fp16 and args.mode == 'test':
+            model2 = amp.initialize(model, opt_level="O1")
+            print('fp16 on')
+        else:
+            model2 = model
+        model2.load_state_dict(checkpoint["model"])
 
         for step, batch in enumerate(test_data_loader):
             speech = batch["speech"].to(device)
-            output = evaluate(model, speech, device)
+            output = evaluate(model2, speech,tokenizer, beam_decoder)
             result_list.extend(output)
             
         prob = [1] * len(result_list)
@@ -221,11 +231,11 @@ if __name__ == "__main__":
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--total_epoch", type=int, default=60)
     parser.add_argument("--warmup_step", type=int, default=15000)
-    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--lr", type=float, default=0)#5e-4
     parser.add_argument("--reload_from", type=int, default=0)
     parser.add_argument("--log_every", type=int, default=1)
-    parser.add_argument("--valid_every", type=int, default=10000)
-    parser.add_argument("--save_every", type=int, default=10000)
+    parser.add_argument("--valid_every", type=int, default=20000)
+    parser.add_argument("--save_every", type=int, default=20000)
     parser.add_argument("--strategy", type=str, default="step")
     parser.add_argument("--max_vocab_size", type=int, default=-1)
     parser.add_argument("--checkpoint", type=str)
@@ -252,6 +262,9 @@ if __name__ == "__main__":
         train_path = os.path.join(DATASET_PATH, "train")
         file_list = sorted(glob(os.path.join(train_path, "train_data", "*")))
         label = pd.read_csv(os.path.join(train_path, "train_label"))
+        
+        kspon = pd.read_csv('data/stt1_kspon.csv')
+        print(kspon.iloc[0])
 
         duration = sorted([get_pcm_duration(file) for file in file_list])
         
@@ -293,8 +306,8 @@ if __name__ == "__main__":
             tokenizer = dict_for_infer['tokenizer']
 
             args.batch_size = dict_for_infer['batch_size']
-            args.total_epoch = dict_for_infer['epochs']
-            args.lr = dict_for_infer['learning_rate']
+            #args.total_epoch = dict_for_infer['epochs']
+            #args.lr = dict_for_infer['learning_rate']
 
 
         else:
@@ -308,9 +321,13 @@ if __name__ == "__main__":
 
         train_tokens = tokenizer.txt2token(train_label)
         valid_tokens = tokenizer.txt2token(val_label)
+        
+        kspon_tokens = tokenizer.txt2token(kspon['target'].values)
+        print(os.listdir('./'))
+        kspon['target'] = pd.Series(kspon_tokens)
 
-        train_dataset = CustomDataset(train_file_list, train_tokens,max_size=213347)
-        valid_dataset = CustomDataset(val_file_list, valid_tokens,max_size=213347)
+        train_dataset = with_kspon_datset(train_file_list, train_tokens,kspon_data=kspon,max_size=213347)
+        valid_dataset = CustomDataset(val_file_list, valid_tokens,max_size=213347,sort=False)
 
         train_batch_sampler = RandomBucketBatchSampler(
             train_dataset, batch_size=args.batch_size, drop_last=False
@@ -369,8 +386,8 @@ if __name__ == "__main__":
             optimizer,
             num_warmup_steps=args.warmup_step,
             num_training_steps=len(train_dataloader) * args.total_epoch,
-        )  # do not foget to modify the number when dataset is changed
-
+        )  
+        
         model.to(device)
 
         if args.fp16:
@@ -385,9 +402,15 @@ if __name__ == "__main__":
         if args.reload_from != 0:
             optimizer.load_state_dict(dict_for_infer['opt'])
             model.load_state_dict(dict_for_infer['model'])
-            scheduler.load_state_dict(dict_for_infer['scaler'])
             if args.fp16:
                 amp.load_state_dict(checkpoint['amp'])
+                
+            if args.lr == 0:
+                args.lr = dict_for_infer['learning_rate']
+                scheduler.load_state_dict(dict_for_infer['scaler'])
+            else:
+                for g in optimizer.param_groups:
+                    g['lr'] = args.lr
 
         n_iters = len(train_dataloader)
 

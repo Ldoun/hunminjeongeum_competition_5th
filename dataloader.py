@@ -172,6 +172,62 @@ class RandomBucketBatchSampler(object):
         return len(self.random_batches)
 
 
+class with_kspon_datset(Dataset):
+    def __init__(self, path_list, target_list=None,kspon_data = None, mode="train",sort = True, max_size = 0, min_size = 0):
+        self.sr = 16000
+        self.mode = mode
+        self.metadata = pd.DataFrame()
+        self.metadata['file'] = pd.Series(path_list)
+        if self.mode == 'train':
+            self.metadata['target'] = pd.Series(target_list)
+            self.kspon_dataframe = kspon_data
+
+        
+        self.feature_extractor = Wav2Vec2FeatureExtractor(
+            do_normalize=True,
+            feature_size=1,
+            padding_side="right",
+            padding_value=0.0,
+            return_attention_mask=False,
+            sampling_rate=16000,
+        )
+
+        if sort and self.mode == "train":
+            print('getting duration of file')
+            self.metadata['length'] = self.metadata['file'].apply(lambda x: get_duration(x))
+            self.metadata = pd.concat([self.metadata,self.kspon_dataframe])
+            self.metadata.sort_values(by=['length'], inplace=True, ascending=False)
+            self.metadata = self.metadata[(self.metadata['length'] < max_size) & (self.metadata['length'] > min_size) ]
+
+        if self.mode == 'train':
+            print(self.metadata.head())
+            print(self.metadata.tail())
+
+
+    def __len__(self):
+        return len(self.metadata)
+
+    def __getitem__(self, i):
+        data, rate = librosa.load(self.metadata.iloc[i]['file'], sr=None)
+        if rate == 48000:
+            data = librosa.resample(data, orig_sr=48000, target_sr=16000)
+        """ sound = np.zeros(self.sound_max_length)
+        if len(data) <= self.sound_max_length:
+            sound[:data.shape[0]] = data
+        else:
+            sound = data[:self.sound_max_length]"""
+
+        sound = self.feature_extractor(
+            data, sampling_rate=16000, return_tensors="pt"
+        ).input_values
+
+        if self.mode == "train":
+            text = self.metadata.iloc[i]['target']
+            return torch.LongTensor(text), sound
+
+        else:
+            return sound
+
 class CustomDataset(Dataset):
     def __init__(self, path_list, target_list=None, mode="train",sort = True, max_size = 0, min_size = 0):
         self.sr = 16000

@@ -1,4 +1,7 @@
-# nsml: ldoun8260/n sml:9.0
+# nsml: ldoun8260/nsml_stt2:1.0
+#ldoun8260/nsml_stt2:1.0
+#ldoun8260/nsml_stt1:1.0
+#ldoun8260/nsml:9.0
 
 from distutils.core import setup
 
@@ -21,6 +24,8 @@ setup(
         "transformers",
         "apex",
         "datasets",
-        "jiwer"
+        "jiwer==2.2.1",
+        "pydub"
+        #"torchaudio"
     ],
 )

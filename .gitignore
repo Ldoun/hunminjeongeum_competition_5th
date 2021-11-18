@@ -137,3 +137,4 @@ json2tsv.py
 *.binary
 json2tsv_.py
 *.txt
+train.trn
