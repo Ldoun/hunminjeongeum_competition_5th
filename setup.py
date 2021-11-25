@@ -2,6 +2,7 @@
 #ldoun8260/nsml_stt2:1.0
 #ldoun8260/nsml_stt1:1.0
 #ldoun8260/nsml:9.0
+#ldoun8260/nsml:12.0
 
 from distutils.core import setup
 
@@ -25,7 +26,8 @@ setup(
         "apex",
         "datasets",
         "jiwer==2.2.1",
-        "pydub"
+        "pydub",
+        "pyctcdecode"
         #"torchaudio"
     ],
 )

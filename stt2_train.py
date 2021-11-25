@@ -115,7 +115,8 @@ def bind_model(model, parser):
                                 alpha=0, beta=0,
                                 cutoff_top_n=40, cutoff_prob=1.0,
                                 beam_width=beam_width, num_processes=4,
-                                blank_id=tokenizer.txt2idx["<pad>"],
+                                #blank_id=tokenizer.txt2idx["<pad>"],
+                                #blank_id = 1,
                                 log_probs_input=True)
 
         result_list = []
@@ -250,7 +251,9 @@ if __name__ == "__main__":
 
     global dict_for_infer
 
-    model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-base")
+    #nuod/wav2vec2
+    #facebook/wav2vec2-base
+    model = Wav2Vec2ForCTC.from_pretrained("nuod/wav2vec2")
     model.freeze_feature_extractor()
 
     bind_model(model=model, parser=args)

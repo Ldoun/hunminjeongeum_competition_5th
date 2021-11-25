@@ -205,7 +205,6 @@ class with_kspon_datset(Dataset):
             print(self.metadata.head())
             print(self.metadata.tail())
 
-
     def __len__(self):
         return len(self.metadata)
 
@@ -236,7 +235,6 @@ class CustomDataset(Dataset):
         self.mode = mode
         self.metadata = data
         
-        self.metadata = self.metadata.drop(self.metadata[self.metadata['target'].map(len) == 2].index)
         
         self.feature_extractor = Wav2Vec2FeatureExtractor(
             do_normalize=True,
@@ -248,6 +246,7 @@ class CustomDataset(Dataset):
         )
 
         if sort and self.mode == "train":
+            self.metadata = self.metadata.drop(self.metadata[self.metadata['target'].map(len) == 2].index)
             print('getting duration of file')
             try:
                 self.metadata.sort_values(by=['length'], inplace=True, ascending=False)
@@ -270,8 +269,7 @@ class CustomDataset(Dataset):
         if self.metadata.iloc[i]['file'][-3:] == 'npy':
             data = np.load(self.metadata.iloc[i]['file'])
         else:
-            data, rate = librosa.load(self.metadata.iloc[i]['file'], sr=None)
-            
+            data, rate = librosa.load(self.metadata.iloc[i]['file'], sr=None)        
 
         sound = self.feature_extractor(
             data, sampling_rate=16000, return_tensors="pt"
@@ -282,7 +280,7 @@ class CustomDataset(Dataset):
             return torch.LongTensor(text), sound
 
         else:
-            return sound
+            return sound, self.metadata.iloc[i]['file'].split('.')[0]
 
 class AudioCollate(object):
     def __init__(self):
@@ -290,22 +288,25 @@ class AudioCollate(object):
 
     def __call__(self, batch):
         # Right zero-pad mel-spec
-        max_target_len = max([x.size(1) for x in batch])
+        max_target_len = max([x[0].size(1) for x in batch])
         # include mel padded
         mel_padded = torch.FloatTensor(len(batch), max_target_len)
         mel_padded.zero_()
         # output_lengths = torch.LongTensor(len(batch))
 
-        
+        file_names = []
         for i in range(len(batch)):
-            mel = batch[i]
+            mel, file = batch[i]
             mel_padded[i, : mel.size(1)] = mel
+            
+            file_names.append(file)
+            
             # mel_padded[i,mel.size(1):] = -100
             # output_lengths[i] = mel.size(1)
 
         # mask = get_mask_from_lengths(output_lengths)
         
-        return {"speech": mel_padded}
+        return {"speech": mel_padded, "file":file_names}
 
 
 class TextAudioCollate(object):

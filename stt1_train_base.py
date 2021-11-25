@@ -245,7 +245,9 @@ if __name__ == "__main__":
 
     global dict_for_infer
 
-    model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-base")
+    #nuod/wav2vec2
+    #facebook/wav2vec2-base
+    model = Wav2Vec2ForCTC.from_pretrained("nuod/wav2vec2")
     model.freeze_feature_extractor()
 
     bind_model(model=model, parser=args)

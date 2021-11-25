@@ -23,6 +23,8 @@ from transformers import Wav2Vec2ForCTC, Wav2Vec2Config
 from apex import amp
 from ctcdecode import CTCBeamDecoder
 import time
+from pydub import AudioSegment
+from pydub.silence import split_on_silence
 
 def evaluate(model, batch,tokenizer, beam_decoder):
     model.eval()
@@ -148,6 +150,27 @@ def clean(sen):
     cleaned_sen = re.sub('\s{2,}',' ',cleaned_sen)
     return cleaned_sen
 
+def match_target_amplitude(sound, target_dBFS):
+    change_in_dBFS = target_dBFS - sound.dBFS
+    return sound.apply_gain(change_in_dBFS)
+
+def split_to_chunk(speech,result_chunk,addition_flag,min_silence_len):
+    if min_silence_len < 200:
+        return
+    audio_chunks = split_on_silence(speech, min_silence_len=min_silence_len, silence_thresh=-40)
+    for i,chunk in enumerate(audio_chunks):
+        if chunk.frame_count() > 200000:
+            split_to_chunk(chunk,result_chunk, addition_flag, min_silence_len-100)
+
+        else:
+            result_chunk.append(chunk)
+            if chunk.frame_count() < 16000:
+                addition_flag.append(1)
+            else:
+                addition_flag.append(0)
+    return
+
+
 if __name__ == "__main__":
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -240,6 +263,35 @@ if __name__ == "__main__":
         file_list = sorted(glob(os.path.join(train_path, "train_data","wav", "*")))
         label = pd.read_csv(os.path.join(train_path, "train_label"))
         json_list = sorted(glob(os.path.join(train_path, "train_data", "train_info", "*")))
+        
+        files = []
+        for file_num, file in enumerate(file_list):
+            addition_flag = []
+            result_chunk = []
+            sound = AudioSegment.from_wav(file)
+            sound = match_target_amplitude(sound, -20.0)
+            
+            split_to_chunk(sound,result_chunk,addition_flag,500)
+            
+            print(sound.frame_count())
+            print(str(len(addition_flag)) +' ' + str(len(result_chunk)))
+            print('-'*80)
+            
+            result = []
+            for i, flag in enumerate(addition_flag):
+                if flag == 1 and i < len(addition_flag) -1:
+                    result_chunk[i+1] = result_chunk[i] + result_chunk[i + 1]
+                elif flag == 0 or result_chunk[i].frame_count() > 32000:
+                    result.append(result_chunk[i])
+                elif i == len(addition_flag) -1:
+                    result[-1] = result[-1] + result_chunk[i]
+
+            for j, chunk in enumerate(result):
+                new_file = str(file_num) + '_' + str(j)
+                np.save(new_file, chunk.get_array_of_samples())
+                files.append(new_file + '.npy')
+                
+                
         
         labels = []
         for file in json_list:

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from re import A
 from shutil import ExecError
 import numpy as np
 import torch
@@ -19,6 +20,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 import json
 from pydub import AudioSegment
+from pydub.silence import split_on_silence
 
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Config
 from apex import amp
@@ -26,7 +28,6 @@ from ctcdecode import CTCBeamDecoder
 
 def evaluate(model, batch,tokenizer, beam_decoder):
     model.eval()
-    model.to(device)
     
     with torch.no_grad():
         logits = model(batch).logits
@@ -40,6 +41,21 @@ def evaluate(model, batch,tokenizer, beam_decoder):
 
     return result_list
 
+def split_to_chunk(speech,result_chunk,addition_flag,min_silence_len):
+    if min_silence_len < 200:
+        return
+    audio_chunks = split_on_silence(speech, min_silence_len=min_silence_len, silence_thresh=-40)
+    for i,chunk in enumerate(audio_chunks):
+        if chunk.frame_count() > 200000:
+            split_to_chunk(chunk,result_chunk, addition_flag, min_silence_len-100)
+
+        else:
+            result_chunk.append(chunk)
+            if chunk.frame_count() < 16000:
+                addition_flag.append(1)
+            else:
+                addition_flag.append(0)
+    return
 
 def save_checkpoint(checkpoint, dir):
     torch.save(checkpoint, os.path.join(dir))
@@ -85,8 +101,35 @@ def bind_model(model, parser):
         test_file_list = sorted(
             glob(os.path.join(DATASET_PATH, "test", "test_data", "*"))
         )
+        
+        files = []
+        
+        for file_num, file in enumerate(test_file_list):
+            addition_flag = []
+            result_chunk = []
+            sound = AudioSegment.from_wav(file)
+            sound = match_target_amplitude(sound, -20.0)
+            
+            split_to_chunk(sound,result_chunk,addition_flag,500)
+            
+            result = []
+            for i, flag in enumerate(addition_flag):
+                if flag == 1 and i < len(addition_flag) -1:
+                    result_chunk[i+1] = result_chunk[i] + result_chunk[i + 1]
+                elif flag == 0 or result_chunk[i].frame_count() > 80000:
+                    result.append(result_chunk[i])
+                elif i == len(addition_flag) -1:
+                    result[-1] = result[-1] + result_chunk[i]
 
-        test_dataset = CustomDataset(test_file_list, mode="test")
+            for j, chunk in enumerate(result):
+                new_file = str(file_num) + '_' + str(j)
+                np.save(new_file, chunk.get_array_of_samples())
+                files.append(new_file + '.npy')
+        
+        test_data = pd.DataFrame()
+        test_data['file'] = pd.Series(files)
+        
+        test_dataset = CustomDataset(test_data, mode="test")
         test_sampler = RandomBucketBatchSampler(
             test_dataset, batch_size=dict_for_infer["batch_size"], drop_last=False
         )
@@ -99,11 +142,10 @@ def bind_model(model, parser):
         beam_decoder = CTCBeamDecoder(tokenizer.vocab,
                                 #model_path='n-gram/stt2_n2.binary',
                                 alpha=0, beta=0,
-                                cutoff_top_n=40, cutoff_prob=1.0,
-                                beam_width=300, num_processes=4,
+                                cutoff_top_n=20, cutoff_prob=1.0,
+                                beam_width=100, num_processes=4,
                                 blank_id=tokenizer.txt2idx["<pad>"],
                                 log_probs_input=True)
-        result_list = []
         
         model.to(device)
         if args.fp16 and args.mode == 'test':
@@ -112,18 +154,33 @@ def bind_model(model, parser):
         else:
             model2 = model
         model2.load_state_dict(checkpoint["model"])
-
+        
+        result_list = []
+        result_file_list = []
+        
         for step, batch in enumerate(test_data_loader):
             speech = batch["speech"].to(device)
             output = evaluate(model2, speech,tokenizer, beam_decoder)
+            
             result_list.extend(output)
+            result_file_list.extend(batch['file'])
+            
+        final_result = [str() for i in range(len(test_file_list))]
+        for r,f in zip(result_list,result_file_list):
+            num = int(f.split('_')[0])
+            final_result[num] = final_result[num] + r + ' '
 
-        prob = [1] * len(result_list)
+        for i in range(len(final_result)):
+            final_result[i] = final_result[i].strip()
+        
+        files = []
+        for file in test_file_list:
+            files.append(file.split('/')[-1])
 
         # DONOTCHANGE: They are reserved for nsml
         # 리턴 결과는 [(확률, 0 or 1)] 의 형태로 보내야만 리더보드에 올릴 수 있습니다. 리더보드 결과에 확률의 값은 영향을 미치지 않습니다
         # return list(zip(pred.flatten(), clipped.flatten()))
-        return list(zip(prob, result_list))
+        return list(zip(files, final_result))
 
     # DONOTCHANGE: They are reserved for nsml
     # nsml에서 지정한 함수에 접근할 수 있도록 하는 함수입니다.
@@ -277,8 +334,11 @@ if __name__ == "__main__":
             with open(file,'r',encoding='UTF8') as f:
                 data = json.load(f)
                 
-            sound, sr = librosa.load(os.path.join(wav_path,data['id']), sr=None)
-                
+            #sound, sr = librosa.load(os.path.join(wav_path,data['id']), sr=None)
+            sound = AudioSegment.from_wav(os.path.join(wav_path,data['id']))
+            sound = match_target_amplitude(sound, -20.0).get_array_of_samples()
+            sr = 16000
+            
             for value in data['utterance']:
                 np_sound = sound[int(value['start'] * sr): int(value['end'] * sr)]
                 
@@ -410,7 +470,7 @@ if __name__ == "__main__":
             except ImportError:
                 raise ImportError(
                     "Please install apex from https://www.github.com/nvidia/apex to use fp16 training."
-                )
+                )   
             model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
         
         if args.reload_from != 0:
