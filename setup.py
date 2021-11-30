@@ -19,7 +19,7 @@ setup(
         "tensorboard-plugin-wit==1.8.0",
         "tensorboardX==2.1",
         "torch-optimizer",
-        #"torch==1.7.1",
+        "torch",
         "torchmetrics",
         "tqdm",
         "transformers",
@@ -27,7 +27,8 @@ setup(
         "datasets",
         "jiwer==2.2.1",
         "pydub",
-        "pyctcdecode"
+        "pyctcdecode==0.1.1",
+        "gdown"
         #"torchaudio"
     ],
 )

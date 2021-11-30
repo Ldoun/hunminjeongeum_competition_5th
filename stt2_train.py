@@ -45,6 +45,7 @@ def evaluate(model, batch,tokenizer, beam_decoder):
         a = tokenizer.convert(token[0][:out_len[0]],predicted=False)
         result_list.append(a)
 
+    print(result_list)
     #print(time.time() - now)
     return result_list
 
@@ -209,6 +210,8 @@ def validate(valid_dataloader, model, tokenizer):
             #result_list.append("".join([tokenizer.idx2txt[x] for x in token]))
             a = tokenizer.convert(token[0][:out_len[0]],predicted=False)
             result_list.append(a)
+            
+        print(result_list[0])
 
         references = [tokenizer.convert(sen,predicted=False) for sen in text.cpu().numpy()]        
 

@@ -21,7 +21,7 @@ import argparse
 import nsml
 from nsml import HAS_DATASET, DATASET_PATH
 
-from dataloader_rnn import *
+from dataloader_np import *
 from model.stt3_rnn_model import SpeechRecognitionModel
 
 from apex import amp
@@ -265,8 +265,9 @@ if __name__ == "__main__":
     if args.mode == "train":
        #stt3 train 파일 생성 수정 필요  
         train_path = os.path.join(DATASET_PATH, "train")
+        wav_path = os.path.join(train_path, "train_data","wav")
         file_list = sorted(glob(os.path.join(train_path, "train_data","wav", "*")))
-        json_list = sorted(glob(os.path.join(train_path, "train_data","info", "*")))
+        json_list = sorted(glob(os.path.join(train_path, "train_data","train_info", "*")))
         
         label = pd.read_csv(os.path.join(train_path, "train_label"))
 
@@ -281,22 +282,32 @@ if __name__ == "__main__":
         splited_train_label = []
         
         duration = []
-        for json_file in json_list:
-            with open(json_file, 'r', encoding='UTF8') as f:
+        for file in json_list:
+            with open(file,'r',encoding='UTF8') as f:
                 data = json.load(f)
-            
-            if data['id'] in train_label['file_name'].values:
-                sound, sr = librosa.load(data['id'], sr=None)
                 
-                for value in data['utterance']:
-                    splited_train_label.append(value['dialect_form'])
-                    file_name = len(splited_train_file) + '.npz'
-                    splited_train_file.append(file_name)
+            #sound, sr = librosa.load(os.path.join(wav_path,data['id']), sr=None)
+            sound, sr = librosa.load(os.path.join(wav_path,data['id']), sr = None)
+            
+            sr = 16000
+            
+            for value in data['utterance']:
+                np_sound = sound[int(value['start'] * sr): int(value['end'] * sr)]
+                duration.append(len(np_sound))
+                '''if data['id'] in train_label['file_name'].values:
+                    #splited_train_labels.append(value['dialect_form'])
+                    #file_name = str(file_cnt) 
+                    #splited_train_file.append(file_name + '.npy')
+                    duration.append(len(np_sound)) 
                     
-                    np.save(file_name,sound[int(value['start'] * sr): int(value['value'] * sr)])
-                    duration.append(len(sound[value['start'] * sr: value['value'] * sr]))
+                elif data['id'] in val_label['file_name'].values:
+                    #splited_valid_labels.append(value['dialect_form'])
+                    #file_name = str(file_cnt) 
+                    #splited_valid_file.append(file_name + '.npy')
+                    duration.append(len(np_sound)) '''
                     
-        
+        duration = sorted(duration)
+        print('mean:', str(sum(duration)/len(duration)))
         print('start measuring duration')
         print('0%:', str(duration[:10]))
         print('50%: ',str(duration[int(len(duration) * 0.5)]))

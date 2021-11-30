@@ -258,7 +258,8 @@ if __name__ == "__main__":
         print(len(stt2_kspon) - int(len(stt2_kspon) * 0.995))
         print(len(stt2_kspon))
         '''
-       
+        print(os.listdir())
+        raise       
         train_path = os.path.join(DATASET_PATH, "train")
         file_list = sorted(glob(os.path.join(train_path, "train_data","wav", "*")))
         label = pd.read_csv(os.path.join(train_path, "train_label"))

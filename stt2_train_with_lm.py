@@ -7,7 +7,7 @@ import torch.nn as nn
 import time
 from packaging import version
 import math
-from dataloader_pcm import *
+from dataloader import *
 from glob import glob
 import os
 import pandas as pd
@@ -32,22 +32,16 @@ def evaluate(model, batch, beam_decoder):
     model.eval()
     
     with torch.no_grad():
-        logits = model(batch)#.logits.cpu().detach().numpy()
-    print(logits.shape)
-    
-    print(beam_decoder.decode(logits[0]))
-    
-    with Pool(4) as pool:
-        beam_results = beam_decoder.decode_batch(pool, logits)
+        logits = model(batch).logits.cpu().numpy()
+            
+    with Pool(6) as pool:
+        beam_results = beam_decoder.decode_batch(pool, logits, beam_width = 300)
 
     result_list = []
     for token in beam_results:
-        print(token)
-        a = join_jamos(token)
+        a = join_jamos(token.replace('<','').replace('>',''))
         result_list.append(a)
-    
     return result_list
-
 
 def save_checkpoint(checkpoint, dir):
     torch.save(checkpoint, os.path.join(dir))
@@ -108,15 +102,17 @@ def bind_model(model, parser):
         #kenlm_model = kenlm.Model('./n-gram/stt2/binary/stt2_n2.binary')
         tokenizer  = dict_for_infer["tokenizer"]
         
+        tokenizer.vocab[1] = '<'
+        tokenizer.vocab[2] = '>'
+        
         decoder = build_ctcdecoder(
             tokenizer.vocab,
             './n-gram/stt2/arpa/stt2_n2.arpa',
-            #alpha=0,  # tuned on a val set
-            #beta=0,  # tuned on a val set
+            alpha=1.5,  # tuned on a val set
+            beta=0.5,  # tuned on a val set
         )
-        #tokenizer.idx2txt == tokenizer.vocab True
         
-        result_list = []
+        final = []
         
         model.to(device)
         if args.fp16 and args.mode == 'test':
@@ -124,19 +120,21 @@ def bind_model(model, parser):
             print('fp16 on')
         else:
             model2 = model
+            
         model2.load_state_dict(checkpoint["model"])
 
         for step, batch in enumerate(test_data_loader):
             speech = batch["speech"].to(device)
             output = evaluate(model2, speech, decoder)
-            result_list.extend(output)
+            final.extend(output)
             
-        prob = [1] * len(result_list)
+                    
+        prob = [1] * len(final)
 
         # DONOTCHANGE: They are reserved for nsml
         # 리턴 결과는 [(확률, 0 or 1)] 의 형태로 보내야만 리더보드에 올릴 수 있습니다. 리더보드 결과에 확률의 값은 영향을 미치지 않습니다
         # return list(zip(pred.flatten(), clipped.flatten()))
-        return list(zip(prob, result_list))
+        return list(zip(prob, final))
 
     # DONOTCHANGE: They are reserved for nsml
     # nsml에서 지정한 함수에 접근할 수 있도록 하는 함수입니다.

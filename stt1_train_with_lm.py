@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-from re import A
 from shutil import ExecError
 import numpy as np
+from pandas.core.frame import DataFrame
 import torch
 import torch.nn as nn
 import time
 from packaging import version
 import math
-from dataloader_np import *
+from dataloader_pcm import *
 from glob import glob
 import os
 import pandas as pd
@@ -18,44 +18,31 @@ import nsml
 from nsml import HAS_DATASET, DATASET_PATH
 from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
-import json
-from pydub import AudioSegment
-from pydub.silence import split_on_silence
-
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Config
-from apex import amp
 from ctcdecode import CTCBeamDecoder
+import pandas as pd
+import time
+from apex import amp
+from pyctcdecode import build_ctcdecoder
+from multiprocessing import Pool
+import gdown
 
-def evaluate(model, batch,tokenizer, beam_decoder):
+def evaluate(model, batch, beam_decoder):
     model.eval()
     
     with torch.no_grad():
-        logits = model(batch).logits
+        logits = model(batch).logits.cpu().numpy()
 
-    beam_results, beam_scores, timesteps, out_lens = beam_decoder.decode(logits)
+    with Pool(6) as pool:
+        beam_results = beam_decoder.decode_batch(pool, logits,beam_width = 200)
 
     result_list = []
-    for token,out_len in zip(beam_results.cpu().numpy(),out_lens):
-        a = tokenizer.convert(token[0][:out_len[0]],predicted=False)
+    for token in beam_results:
+        a = join_jamos(token.replace('<','').replace('>',''))
         result_list.append(a)
-
+        
     return result_list
 
-def split_to_chunk(speech,result_chunk,addition_flag,min_silence_len):
-    if min_silence_len < 200:
-        return
-    audio_chunks = split_on_silence(speech, min_silence_len=min_silence_len, silence_thresh=-40)
-    for i,chunk in enumerate(audio_chunks):
-        if chunk.frame_count() > 200000:
-            split_to_chunk(chunk,result_chunk, addition_flag, min_silence_len-100)
-
-        else:
-            result_chunk.append(chunk)
-            if chunk.frame_count() < 16000:
-                addition_flag.append(1)
-            else:
-                addition_flag.append(0)
-    return
 
 def save_checkpoint(checkpoint, dir):
     torch.save(checkpoint, os.path.join(dir))
@@ -90,6 +77,7 @@ def bind_model(model, parser):
         tokenizer = dict_for_infer["tokenizer"]
         model.lm_head = nn.Linear(
             in_features=768, out_features=len(tokenizer.txt2idx), bias=True
+            #in_features=768, out_features=80, bias=True
         )
         model.config = Wav2Vec2Config(vocab_size=len(tokenizer.txt2idx))
         #model.load_state_dict(checkpoint["model"])
@@ -102,34 +90,12 @@ def bind_model(model, parser):
             glob(os.path.join(DATASET_PATH, "test", "test_data", "*"))
         )
         
-        files = []
-        
-        for file_num, file in enumerate(test_file_list):
-            addition_flag = []
-            result_chunk = []
-            sound = AudioSegment.from_wav(file)
-            sound = match_target_amplitude(sound, -20.0)
-            
-            split_to_chunk(sound,result_chunk,addition_flag,500)
-            
-            result = []
-            for i, flag in enumerate(addition_flag):
-                if flag == 1 and i < len(addition_flag) -1:
-                    result_chunk[i+1] = result_chunk[i] + result_chunk[i + 1]
-                elif flag == 0 or result_chunk[i].frame_count() > 80000:
-                    result.append(result_chunk[i])
-                elif i == len(addition_flag) -1:
-                    result[-1] = result[-1] + result_chunk[i]
+        url = 'https://drive.google.com/uc?id=11g-A4JGCWMTHj_lELDIorDb9L2m-SdDR'
+        lm_name = 'stt1_n2.arpa'
+        gdown.download(url,lm_name)
 
-            for j, chunk in enumerate(result):
-                new_file = str(file_num) + '_' + str(j)
-                np.save(new_file, chunk.get_array_of_samples())
-                files.append(new_file + '.npy')
-        
-        test_data = pd.DataFrame()
-        test_data['file'] = pd.Series(files)
-        
-        test_dataset = CustomDataset(test_data, mode="test")
+        test_dataset = CustomDataset(test_file_list, mode="test")
+        print('start')
         test_sampler = RandomBucketBatchSampler(
             test_dataset, batch_size=dict_for_infer["batch_size"], drop_last=False
         )
@@ -137,15 +103,19 @@ def bind_model(model, parser):
         test_data_loader = DataLoader(
             test_dataset,batch_size=dict_for_infer["batch_size"], collate_fn=callate_fn, num_workers=8,pin_memory=True
         )
-
+        
         tokenizer  = dict_for_infer["tokenizer"]
-        beam_decoder = CTCBeamDecoder(tokenizer.vocab,
-                                #model_path='n-gram/stt2_n2.binary',
-                                alpha=0, beta=0,
-                                cutoff_top_n=20, cutoff_prob=1.0,
-                                beam_width=100, num_processes=4,
-                                blank_id=tokenizer.txt2idx["<pad>"],
-                                log_probs_input=True)
+        tokenizer.vocab[1] = '<'
+        tokenizer.vocab[2] = '>'
+        
+        decoder = build_ctcdecoder(
+            tokenizer.vocab,
+            './stt1_n2.arpa',
+            alpha=1.5,  # tuned on a val set
+            beta=1.5,  # tuned on a val set
+        )
+        
+        final = []
         
         model.to(device)
         if args.fp16 and args.mode == 'test':
@@ -154,33 +124,18 @@ def bind_model(model, parser):
         else:
             model2 = model
         model2.load_state_dict(checkpoint["model"])
-        
-        result_list = []
-        result_file_list = []
-        
+
         for step, batch in enumerate(test_data_loader):
             speech = batch["speech"].to(device)
-            output = evaluate(model2, speech,tokenizer, beam_decoder)
+            output = evaluate(model2, speech, decoder)
+            final.extend(output)
             
-            result_list.extend(output)
-            result_file_list.extend(batch['file'])
-            
-        final_result = [str() for i in range(len(test_file_list))]
-        for r,f in zip(result_list,result_file_list):
-            num = int(f.split('_')[0])
-            final_result[num] = final_result[num] + r + ' '
-
-        for i in range(len(final_result)):
-            final_result[i] = final_result[i].strip()
-        
-        files = []
-        for file in test_file_list:
-            files.append(file.split('/')[-1])
+        prob = [1] * len(final)
 
         # DONOTCHANGE: They are reserved for nsml
         # 리턴 결과는 [(확률, 0 or 1)] 의 형태로 보내야만 리더보드에 올릴 수 있습니다. 리더보드 결과에 확률의 값은 영향을 미치지 않습니다
         # return list(zip(pred.flatten(), clipped.flatten()))
-        return list(zip(files, final_result))
+        return list(zip(prob, final))
 
     # DONOTCHANGE: They are reserved for nsml
     # nsml에서 지정한 함수에 접근할 수 있도록 하는 함수입니다.
@@ -222,7 +177,7 @@ def validate(valid_dataloader, model, tokenizer):
     beam_decoder = CTCBeamDecoder(tokenizer.vocab,
                                  alpha=alpha, beta=beta,
                                  cutoff_top_n=40, cutoff_prob=1.0,
-                                 beam_width=beam_width, num_processes=11,
+                                 beam_width=beam_width, num_processes=8,
                                  blank_id=tokenizer.txt2idx["<pad>"],
                                  log_probs_input=True)
 
@@ -232,13 +187,10 @@ def validate(valid_dataloader, model, tokenizer):
         with torch.no_grad():
             speech = batch["speech"].to(device)
             text = batch["labels"].to(device)
-            
-            print(speech.shape)
 
             model_predictions = model(speech, labels=text).logits
 
         '''predicted_ids = torch.argmax(model_predictions, dim=-1)
-
         
         predictions = [
             tokenizer.convert(sen) for sen in predicted_ids.cpu().numpy()
@@ -253,25 +205,21 @@ def validate(valid_dataloader, model, tokenizer):
             result_list.append(a)
 
         references = [tokenizer.convert(sen,predicted=False) for sen in text.cpu().numpy()]
-        
-        print(result_list[0])
+        '''print('-'*80)
+        print(result_list)
+        print('-'*80)
+        print(predictions)'''
 
         metric.add_batch(predictions=result_list, references=references)
         
     final_score = metric.compute()
-    print(final_score)
 
     return {"cer": final_score}
 
 def clean(sen):
-    cleaned_sen = re.sub('SP|FP|SN|NO|\(|\)|:|\*|,|…|\{[^\}]+\}','',sen)
-    cleaned_sen = re.sub('&[^&]+&','m',cleaned_sen)
+    cleaned_sen = re.sub('SP|FP|SN|NO|\(|\)|:|\*|,|…','',sen)
     cleaned_sen = re.sub('\s{2,}',' ',cleaned_sen)
     return cleaned_sen
-
-def match_target_amplitude(sound, target_dBFS):
-    change_in_dBFS = target_dBFS - sound.dBFS
-    return sound.apply_gain(change_in_dBFS)
 
 if __name__ == "__main__":
     # See all possible arguments in src/transformers/training_args.py
@@ -283,17 +231,17 @@ if __name__ == "__main__":
     parser.add_argument("--iteration", type=str, default="0")
     parser.add_argument("--pause", type=int, default=0)
     parser.add_argument("--seed", type=int, default=40)
-    parser.add_argument("--batch_size", type=int, default=20)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--fp16", action="store_true")
-    parser.add_argument("--total_epoch", type=int, default=200)
+    parser.add_argument("--total_epoch", type=int, default=60)
     parser.add_argument("--warmup_step", type=int, default=15000)
-    parser.add_argument("--lr", type=float, default=5e-5)
+    parser.add_argument("--lr", type=float, default=0)#5e-4
+    parser.add_argument("--reload_from", type=int, default=0)
     parser.add_argument("--log_every", type=int, default=1)
-    parser.add_argument("--valid_every", type=int, default=5000)
-    parser.add_argument("--save_every", type=int, default=5000)
+    parser.add_argument("--valid_every", type=int, default=20000)
+    parser.add_argument("--save_every", type=int, default=20000)
     parser.add_argument("--strategy", type=str, default="step")
     parser.add_argument("--max_vocab_size", type=int, default=-1)
-    parser.add_argument("--reload_from", type=int, default=0)
     parser.add_argument("--checkpoint", type=str)
     parser.add_argument("--session", type=str)
 
@@ -301,6 +249,8 @@ if __name__ == "__main__":
 
     global dict_for_infer
 
+    #nuod/wav2vec2
+    #facebook/wav2vec2-base
     model = Wav2Vec2ForCTC.from_pretrained("nuod/wav2vec2")
     model.freeze_feature_extractor()
 
@@ -309,92 +259,66 @@ if __name__ == "__main__":
     if args.pause:
         nsml.paused(scope=locals())
 
+    if args.mode == 'save':
+        nsml.load(args.checkpoint, session = args.session)
+        nsml.save(checkpoint=f"{args.reload_from}")
+
     if args.mode == "train":
        
         train_path = os.path.join(DATASET_PATH, "train")
-        wav_path = os.path.join(train_path, "train_data","wav")
-        json_list = sorted(glob(os.path.join(train_path, "train_data","train_info", "*")))
+        file_list = sorted(glob(os.path.join(train_path, "train_data", "*")))
         label = pd.read_csv(os.path.join(train_path, "train_label"))
-
-        split_num = int(len(label) * 0.995)
         
+        kspon = pd.read_csv('data/stt1_kspon.csv')
+        print(kspon.iloc[0])
+
+        duration = sorted([get_pcm_duration(file) for file in file_list])
+        
+        '''print('50%: ',str(duration[int(len(duration) * 0.5)]))
+        print('80%: ',str(duration[int(len(duration) * 0.8)]))
+        print('90%: ',str(duration[int(len(duration) * 0.9)]))
+        print('95%: ',str(duration[int(len(duration) * 0.95)]))
+        print('98%: ',str(duration[int(len(duration) * 0.98) -1]))
+        print('99%: ',str(duration[int(len(duration) * 0.99) -1]))
+        print('99.5%: ',str(duration[int(len(duration) * 0.995) -1]))
+        print('100%: ',str(duration[int(len(duration)) -1]))
+        
+        print(len(duration) - int(len(duration) * 0.995))
+        print(len(duration))
+        
+        50%:  106492
+        80%:  156369
+        90%:  171680
+        95%:  184352
+        98%:  200200
+        99%:  213347
+        99.5%:  231431
+        100%:  338538
+        1345
+        268928'''
+
+        split_num = int(len(label) * 0.9)
+        train_file_list = file_list[:split_num]
+        val_file_list = file_list[split_num:]
+
         train_label = label.iloc[:split_num]
         val_label = label.iloc[split_num:]
-        
-        
-        splited_train_labels = []
-        splited_valid_labels = []
-        splited_train_file = []
-        splited_valid_file = []
-        train_duration = []
-        valid_duration = []
-        file_cnt = 0
-        
-        print('making np_data')
-        print(len(json_list))
-        for k, file in enumerate(json_list):
-            print(k)
-                        
-            with open(file,'r',encoding='UTF8') as f:
-                data = json.load(f)
-                                     
-            #sound, sr = librosa.load(os.path.join(wav_path,data['id']), sr=16000)
-            #sound = match_target_amplitude(sound, -20.0).get_array_of_samples()
-            sound = AudioSegment.from_wav(os.path.join(wav_path,data['id']))
-            sr = 16000
-            sound = sound.set_frame_rate(16000)
-            print(sound.frame_rate)
-            sound = sound.get_array_of_samples()
-            
-                        
-            for value in data['utterance']:
-                np_sound = sound[int(value['start'] * sr): int(value['end'] * sr)]
-                
-                if data['id'] in val_label['file_name'].values:
-                    splited_valid_labels.append(value['dialect_form'])
-                    file_name = str(file_cnt) 
-                    splited_valid_file.append(file_name + '.npy')
-                    valid_duration.append(len(np_sound)) 
-                    
-                else:
-                    splited_train_labels.append(value['dialect_form'])
-                    file_name = str(file_cnt) 
-                    splited_train_file.append(file_name + '.npy')
-                    train_duration.append(len(np_sound)) 
-                    
-                    
-                file_cnt += 1
-                
-                np.save(file_name,np_sound)
-                    
-        print('done')
-        
-        train_data = pd.DataFrame()
-        train_data['file'] = pd.Series(splited_train_file)
-        train_data['target'] = pd.Series(splited_train_labels)
-        train_data['length'] = pd.Series(train_duration)
-       
-        valid_data = pd.DataFrame()
-        valid_data['file'] = pd.Series(splited_valid_file)
-        valid_data['target'] = pd.Series(splited_valid_labels)  
-        valid_data['length'] = pd.Series(valid_duration)  
-        
-        train_label = [clean(sen) for sen in train_data.target]
-        val_label = [clean(sen) for sen in valid_data.target]
+
+        train_label = [clean(sen) for sen in train_label.text]
+        val_label = [clean(sen) for sen in val_label.text]
 
         if args.reload_from != 0:
             nsml.load(args.checkpoint, session = args.session)
             tokenizer = dict_for_infer['tokenizer']
 
             args.batch_size = dict_for_infer['batch_size']
-            args.total_epoch = dict_for_infer['epochs']
-            args.lr = dict_for_infer['learning_rate']
+            #args.total_epoch = dict_for_infer['epochs']
+            #args.lr = dict_for_infer['learning_rate']
+
 
         else:
             tokenizer = CustomTokenizer()
             tokenizer.fit(train_label)
-
-        print(tokenizer.txt2idx)
 
         model.lm_head = nn.Linear(
             in_features=768, out_features=len(tokenizer.txt2idx), bias=True
@@ -404,14 +328,12 @@ if __name__ == "__main__":
         train_tokens = tokenizer.txt2token(train_label)
         valid_tokens = tokenizer.txt2token(val_label)
         
-        train_data['target'] = pd.Series(train_tokens)
-        valid_data['target'] = pd.Series(valid_tokens)
+        kspon_tokens = tokenizer.txt2token(kspon['target'].values)
+        print(os.listdir('./'))
+        kspon['target'] = pd.Series(kspon_tokens)
 
-        train_dataset = CustomDataset(train_data, max_size=200000, min_size=5000)
-        valid_dataset = CustomDataset(valid_data, max_size=200000, min_size=5000)        
-        
-        print(len(train_dataset))
-        print('-'*80)
+        train_dataset = with_kspon_datset(train_file_list, train_tokens,kspon_data=kspon,max_size=213347)
+        valid_dataset = CustomDataset(val_file_list, valid_tokens,max_size=213347,sort=False)
 
         train_batch_sampler = RandomBucketBatchSampler(
             train_dataset, batch_size=args.batch_size, drop_last=False
@@ -426,14 +348,14 @@ if __name__ == "__main__":
             train_dataset,
             batch_sampler=train_batch_sampler,
             collate_fn=collate_fn,
-            num_workers=11,
+            num_workers=8,
             pin_memory=True
         )
         valid_dataloader = DataLoader(
             valid_dataset,
             batch_sampler=valid_batch_sampler,
             collate_fn=collate_fn,
-            num_workers=11,
+            num_workers=8,
             pin_memory=True
         )
 
@@ -470,8 +392,8 @@ if __name__ == "__main__":
             optimizer,
             num_warmup_steps=args.warmup_step,
             num_training_steps=len(train_dataloader) * args.total_epoch,
-        )  # do not foget to modify the number when dataset is changed
-
+        )  
+        
         model.to(device)
 
         if args.fp16:
@@ -480,15 +402,21 @@ if __name__ == "__main__":
             except ImportError:
                 raise ImportError(
                     "Please install apex from https://www.github.com/nvidia/apex to use fp16 training."
-                )   
+                )
             model, optimizer = amp.initialize(model, optimizer, opt_level="O1")
         
         if args.reload_from != 0:
             optimizer.load_state_dict(dict_for_infer['opt'])
             model.load_state_dict(dict_for_infer['model'])
-            scheduler.load_state_dict(dict_for_infer['scaler'])
             if args.fp16:
                 amp.load_state_dict(checkpoint['amp'])
+                
+            if args.lr == 0:
+                args.lr = dict_for_infer['learning_rate']
+                scheduler.load_state_dict(dict_for_infer['scaler'])
+            else:
+                for g in optimizer.param_groups:
+                    g['lr'] = args.lr
 
         n_iters = len(train_dataloader)
 

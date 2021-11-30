@@ -24,22 +24,20 @@ from pydub.silence import split_on_silence
 
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Config
 from apex import amp
+from pyctcdecode import build_ctcdecoder
 from ctcdecode import CTCBeamDecoder
+from multiprocessing import Pool
 
-def evaluate(model, batch,tokenizer, beam_decoder):
+def evaluate(model, batch, beam_decoder):
     model.eval()
     
     with torch.no_grad():
-        logits = model(batch).logits
-
-    beam_results, beam_scores, timesteps, out_lens = beam_decoder.decode(logits)
-
-    result_list = []
-    for token,out_len in zip(beam_results.cpu().numpy(),out_lens):
-        a = tokenizer.convert(token[0][:out_len[0]],predicted=False)
-        result_list.append(a)
-
-    return result_list
+        logits = model(batch).logits.cpu().numpy()
+    
+    with Pool(5) as pool:
+        beam_results = beam_decoder.decode_batch(pool, logits)
+        
+    return beam_results
 
 def split_to_chunk(speech,result_chunk,addition_flag,min_silence_len):
     if min_silence_len < 200:
@@ -103,6 +101,7 @@ def bind_model(model, parser):
         )
         
         files = []
+        last_file_index = [0]
         
         for file_num, file in enumerate(test_file_list):
             addition_flag = []
@@ -125,27 +124,30 @@ def bind_model(model, parser):
                 new_file = str(file_num) + '_' + str(j)
                 np.save(new_file, chunk.get_array_of_samples())
                 files.append(new_file + '.npy')
+                
+            last_file_index.append(last_file_index[-1] + len(result))
+                
         
         test_data = pd.DataFrame()
         test_data['file'] = pd.Series(files)
         
         test_dataset = CustomDataset(test_data, mode="test")
-        test_sampler = RandomBucketBatchSampler(
-            test_dataset, batch_size=dict_for_infer["batch_size"], drop_last=False
-        )
+        
         callate_fn = AudioCollate()
         test_data_loader = DataLoader(
             test_dataset,batch_size=dict_for_infer["batch_size"], collate_fn=callate_fn, num_workers=8,pin_memory=True
         )
 
         tokenizer  = dict_for_infer["tokenizer"]
-        beam_decoder = CTCBeamDecoder(tokenizer.vocab,
-                                #model_path='n-gram/stt2_n2.binary',
-                                alpha=0, beta=0,
-                                cutoff_top_n=20, cutoff_prob=1.0,
-                                beam_width=100, num_processes=4,
-                                blank_id=tokenizer.txt2idx["<pad>"],
-                                log_probs_input=True)
+        tokenizer.vocab[1] = '<'
+        tokenizer.vocab[2] = '>'
+        
+        decoder = build_ctcdecoder(
+            tokenizer.vocab,
+            #'./n-gram/stt3/arpa/stt3_n2.arpa',#test 용
+            #alpha=1.5,  # tuned on a val set
+            #beta=0,  # tuned on a val set
+        )
         
         model.to(device)
         if args.fp16 and args.mode == 'test':
@@ -160,27 +162,22 @@ def bind_model(model, parser):
         
         for step, batch in enumerate(test_data_loader):
             speech = batch["speech"].to(device)
-            output = evaluate(model2, speech,tokenizer, beam_decoder)
+            output = evaluate(model2, speech,decoder)
             
             result_list.extend(output)
             result_file_list.extend(batch['file'])
-            
-        final_result = [str() for i in range(len(test_file_list))]
-        for r,f in zip(result_list,result_file_list):
-            num = int(f.split('_')[0])
-            final_result[num] = final_result[num] + r + ' '
-
-        for i in range(len(final_result)):
-            final_result[i] = final_result[i].strip()
         
         files = []
-        for file in test_file_list:
+        final = []
+        for i, file in enumerate(test_file_list):
+            text = ' '.join(result_list[last_file_index[i]:last_file_index[i+1]]).replace('<','').replace('>','')
+            final.append(join_jamos(text))
             files.append(file.split('/')[-1])
 
         # DONOTCHANGE: They are reserved for nsml
         # 리턴 결과는 [(확률, 0 or 1)] 의 형태로 보내야만 리더보드에 올릴 수 있습니다. 리더보드 결과에 확률의 값은 영향을 미치지 않습니다
         # return list(zip(pred.flatten(), clipped.flatten()))
-        return list(zip(files, final_result))
+        return list(zip(files, final))
 
     # DONOTCHANGE: They are reserved for nsml
     # nsml에서 지정한 함수에 접근할 수 있도록 하는 함수입니다.
@@ -288,12 +285,12 @@ if __name__ == "__main__":
     parser.add_argument("--total_epoch", type=int, default=200)
     parser.add_argument("--warmup_step", type=int, default=15000)
     parser.add_argument("--lr", type=float, default=5e-5)
+    parser.add_argument("--reload_from", type=int, default=0)
     parser.add_argument("--log_every", type=int, default=1)
     parser.add_argument("--valid_every", type=int, default=5000)
     parser.add_argument("--save_every", type=int, default=5000)
     parser.add_argument("--strategy", type=str, default="step")
     parser.add_argument("--max_vocab_size", type=int, default=-1)
-    parser.add_argument("--reload_from", type=int, default=0)
     parser.add_argument("--checkpoint", type=str)
     parser.add_argument("--session", type=str)
 
@@ -316,7 +313,7 @@ if __name__ == "__main__":
         json_list = sorted(glob(os.path.join(train_path, "train_data","train_info", "*")))
         label = pd.read_csv(os.path.join(train_path, "train_label"))
 
-        split_num = int(len(label) * 0.995)
+        split_num = int(len(label) * 0.93)
         
         train_label = label.iloc[:split_num]
         val_label = label.iloc[split_num:]
@@ -330,45 +327,35 @@ if __name__ == "__main__":
         valid_duration = []
         file_cnt = 0
         
-        print('making np_data')
-        print(len(json_list))
-        for k, file in enumerate(json_list):
-            print(k)
-                        
+        for file in json_list:
             with open(file,'r',encoding='UTF8') as f:
                 data = json.load(f)
-                                     
-            #sound, sr = librosa.load(os.path.join(wav_path,data['id']), sr=16000)
-            #sound = match_target_amplitude(sound, -20.0).get_array_of_samples()
+                
+            #sound, sr = librosa.load(os.path.join(wav_path,data['id']), sr=None)
             sound = AudioSegment.from_wav(os.path.join(wav_path,data['id']))
+            sound = match_target_amplitude(sound, -20.0).get_array_of_samples()
             sr = 16000
-            sound = sound.set_frame_rate(16000)
-            print(sound.frame_rate)
-            sound = sound.get_array_of_samples()
             
-                        
             for value in data['utterance']:
                 np_sound = sound[int(value['start'] * sr): int(value['end'] * sr)]
                 
-                if data['id'] in val_label['file_name'].values:
-                    splited_valid_labels.append(value['dialect_form'])
-                    file_name = str(file_cnt) 
-                    splited_valid_file.append(file_name + '.npy')
-                    valid_duration.append(len(np_sound)) 
-                    
-                else:
+                if data['id'] in train_label['file_name'].values:
                     splited_train_labels.append(value['dialect_form'])
                     file_name = str(file_cnt) 
                     splited_train_file.append(file_name + '.npy')
                     train_duration.append(len(np_sound)) 
                     
+                elif data['id'] in val_label['file_name'].values:
+                    splited_valid_labels.append(value['dialect_form'])
+                    file_name = str(file_cnt) 
+                    splited_valid_file.append(file_name + '.npy')
+                    valid_duration.append(len(np_sound)) 
                     
                 file_cnt += 1
                 
                 np.save(file_name,np_sound)
-                    
-        print('done')
         
+                
         train_data = pd.DataFrame()
         train_data['file'] = pd.Series(splited_train_file)
         train_data['target'] = pd.Series(splited_train_labels)
